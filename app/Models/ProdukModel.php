@@ -10,29 +10,48 @@ class ProdukModel extends Model
     protected $primaryKey       = 'id_produk';
     protected $useAutoIncrement = true;
     protected $returnType       = 'array';
-
+    protected $useSoftDeletes   = true;
+    protected $deletedField     = 'deleted_at';
     protected $allowedFields    = [
-        'id_user', 
-        'id_kategori', 
-        'nama_produk', 
-        'harga', 
-        'gambar_produk'
+        'id_user',
+        'id_kategori',
+        'nama_produk',
+        'harga',
+        'gambar_produk',
+        'is_active'
     ];
 
     protected $useTimestamps    = true;
     protected $createdField     = 'created_at';
     protected $updatedField     = 'updated_at';
 
-    public function getProdukLengkap($id_produk = null)
+    // Tambahkan $role = null di dalam kurung parameter
+    public function getProdukLengkap($id_produk = null, $id_kategori = null, $id_owner = null, $role = null)
     {
-        $this->select('produk.*, kategori.nama_kategori, users.nama_lengkap as nama_pembuat');
-        $this->join('kategori', 'kategori.id_kategori = produk.id_kategori', 'left');
-        $this->join('users', 'users.id_user = produk.id_user', 'left');
+        $builder = $this->db->table('produk');
+        $builder->select('produk.*, kategori.nama_kategori');
+        $builder->join('kategori', 'kategori.id_kategori = produk.id_kategori');
 
-        if ($id_produk != null) {
-            return $this->where('produk.id_produk', $id_produk)->first();
+        // 🛡️ LOGIKA VISIBILITAS CERDAS 
+        // Jika yang akses adalah Kasir, sembunyikan produk yang is_active = 0
+        // Jika yang akses Owner/Admin, kode ini dilewati (semua produk muncul)
+        if ($role === 'Kasir') {
+            $builder->where('produk.is_active', 1);
         }
 
-        return $this->findAll();
+        if ($id_produk != null) {
+            $builder->where('produk.id_produk', $id_produk);
+            return $builder->get()->getRowArray();
+        }
+
+        if ($id_kategori != null) {
+            $builder->where('produk.id_kategori', $id_kategori);
+        }
+
+        if ($id_owner != null) {
+            $builder->where('produk.id_user', $id_owner);
+        }
+
+        return $builder->get()->getResultArray();
     }
 }

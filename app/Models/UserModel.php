@@ -15,8 +15,14 @@ class UserModel extends Model
         'password',
         'nama_lengkap',
         'role',
+        'is_active',
+        'no_hp',
+        'foto_profile',
         'pin_hash',
-        'biometric_token'
+        'biometric_token',
+        'persentase_komisi',
+        'otp_code',  
+        'otp_expired_at'
     ];
 
     protected $useTimestamps    = true;
