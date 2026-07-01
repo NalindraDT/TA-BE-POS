@@ -51,7 +51,9 @@ $routes->group('', ['filter' => 'jwt'], function ($routes) {
     // ----------------------------------------
     // 🛒 TRANSAKSI & PEMBAYARAN MIDTRANS
     // ----------------------------------------
+    $routes->get('transaksi/riwayat', 'Transaksi::riwayat');
     $routes->post('payment/create', 'Payment::createTransaction');
+    $routes->post('transaksi/lanjutkanPembayaran/(:num)', 'Transaksi::lanjutkanPembayaran/$1');
     $routes->put('transaksi/pelunasan/(:num)', 'Transaksi::pelunasanManual/$1');
 
     // ----------------------------------------

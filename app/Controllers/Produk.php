@@ -42,18 +42,21 @@ class Produk extends ResourceController
         if (!$user) return $this->failUnauthorized('Token tidak valid.');
 
         $model = new ProdukModel();
+        
+        // 👈 Tangkap parameter filter & pencarian dari Frontend
         $id_kategori = $this->request->getGet('id_kategori');
+        $keyword     = $this->request->getGet('keyword'); // ✨ INI TAMBAHANNYA
         
         $id_owner = ($user['role'] === 'Owner') ? $user['id_user'] : null;
-        $role_pengakses = $user['role']; // 👈 Tangkap role-nya di sini
+        $role_pengakses = $user['role']; 
 
-        // Lempar variabel $role_pengakses sebagai parameter ke-4
-        $data = $model->getProdukLengkap(null, $id_kategori, $id_owner, $role_pengakses);
+        // 👈 Lempar variabel $keyword sebagai parameter ke-5
+        $data = $model->getProdukLengkap(null, $id_kategori, $id_owner, $role_pengakses, $keyword);
 
         if (empty($data)) {
             return $this->respond([
                 'status'  => 200,
-                'message' => 'Belum ada data produk.',
+                'message' => 'Belum ada data produk atau produk tidak ditemukan.',
                 'data'    => []
             ]);
         }

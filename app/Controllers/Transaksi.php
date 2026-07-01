@@ -15,10 +15,27 @@ class Transaksi extends ResourceController
 {
     protected $format = 'json';
 
+    private function getLoggedInUser()
+    {
+        $header = $this->request->getServer('HTTP_AUTHORIZATION');
+        if (!$header) return null;
+        
+        try {
+            $token   = explode(' ', $header)[1];
+            $key     = getenv('JWT_SECRET');
+            $decoded = JWT::decode($token, new Key($key, 'HS256'));
+            
+            $userModel = new \App\Models\UserModel();
+            return $userModel->find($decoded->uid);
+        } catch (\Exception $e) {
+            return null;
+        }
+    }
+
     public function index()
     {
         $model = new TransaksiModel();
-        
+
         // 1. Tangkap parameter 'status' dari request GET (misal: ?status=pending)
         $statusInput = $this->request->getGet('status');
 
@@ -26,7 +43,7 @@ class Transaksi extends ResourceController
         if (!empty($statusInput)) {
             // Kita gunakan ucfirst() dan strtolower() agar aman, 
             // misal Flutter kirim 'pending' atau 'PENDING', akan diubah jadi 'Pending'
-            $statusFormat = ucfirst(strtolower($statusInput)); 
+            $statusFormat = ucfirst(strtolower($statusInput));
             $model->where('status_pembayaran', $statusFormat);
         }
 
@@ -44,6 +61,9 @@ class Transaksi extends ResourceController
 
     public function show($id = null)
     {
+        $user = $this->getLoggedInUser();
+        if (!$user) return $this->failUnauthorized('Token tidak valid.');
+
         $transaksiModel = new TransaksiModel();
         $detailModel = new DetailTransaksiModel();
 
@@ -52,10 +72,23 @@ class Transaksi extends ResourceController
         if (!$transaksi) {
             return $this->failNotFound('Transaksi tidak ditemukan.');
         } else {
-            $detail = $detailModel->select('detail_transaksi.*, produk.nama_produk')
+            $builder = $detailModel->select('detail_transaksi.*, produk.nama_produk')
                 ->join('produk', 'produk.id_produk = detail_transaksi.id_produk', 'left')
-                ->where('id_transaksi', $id)
-                ->findAll();
+                ->where('id_transaksi', $id);
+
+            if ($user['role'] === 'Owner') {
+                $builder->where('produk.id_user', $user['id_user']);
+            }
+
+            $detail = $builder->findAll();
+
+            $totalHargaOwner = 0;
+            foreach ($detail as $d) {
+                $totalHargaOwner += $d['subtotal'];
+            }
+
+            // Sisipkan variabel baru agar Flutter tidak bingung
+            $transaksi['total_harga_owner'] = $totalHargaOwner;
 
             return $this->respond([
                 'transaksi' => $transaksi,
@@ -68,7 +101,7 @@ class Transaksi extends ResourceController
     {
         $header = $this->request->getServer('HTTP_AUTHORIZATION');
         if (!$header) return $this->failUnauthorized('Token tidak ditemukan.');
-        
+
         $token   = explode(' ', $header)[1];
         $key     = getenv('JWT_SECRET');
         $decoded = JWT::decode($token, new Key($key, 'HS256'));
@@ -85,7 +118,7 @@ class Transaksi extends ResourceController
         $logModel = new \App\Models\LogAktivitasModel();
 
         $db = Database::connect();
-        $db->transStart(); 
+        $db->transStart();
 
         try {
             $namaPelangganInput = $json->nama_pelanggan ?? 'Pelanggan Umum';
@@ -101,6 +134,8 @@ class Transaksi extends ResourceController
                 'kode_invoice'      => $transaksiModel->generateInvoice(),
                 'nama_pelanggan'    => $namaPelangganInput,
                 'total_harga'       => $json->total_harga,
+                'uang_diterima'     => $json->uang_diterima ?? 0,
+                'kembalian'         => $json->kembalian ?? 0,
                 'metode_pembayaran' => $metodePembayaranInput,
                 'status_pembayaran' => $statusPembayaran,
                 'tanggal_transaksi' => date('Y-m-d H:i:s')
@@ -148,26 +183,31 @@ class Transaksi extends ResourceController
 
                 $params = [
                     'transaction_details' => [
-                        // Kita gunakan Invoice asli sebagai Order ID Midtrans!
-                        'order_id'     => $dataTransaksi['kode_invoice'], 
+                        'order_id'     => $dataTransaksi['kode_invoice'],
                         'gross_amount' => $dataTransaksi['total_harga'],
                     ],
                     'customer_details' => [
                         'first_name' => $namaPelangganInput,
                     ]
                 ];
-                
+
+                // 1. Dapatkan token dari Midtrans
                 $snapToken = Snap::getSnapToken($params);
+
+                // 2. 🔥 UPDATE DATABASE: Simpan snap_token ke invoice yang baru dibuat
+                $transaksiModel->update($idTransaksiBaru, [
+                    'snap_token' => $snapToken
+                ]);
             }
 
+            // 3. Pastikan snap_token ikut dikembalikan ke Flutter dalam response
             return $this->respondCreated([
                 'status'       => 201,
                 'message'      => 'Transaksi berhasil disimpan!',
                 'kode_invoice' => $dataTransaksi['kode_invoice'],
                 'id_transaksi' => $idTransaksiBaru,
-                'snap_token'   => $snapToken // 👈 Flutter akan mengecek variabel ini
+                'snap_token'   => $snapToken
             ]);
-
         } catch (\Exception $e) {
             $db->transRollback();
             return $this->fail($e->getMessage(), 400);
@@ -178,7 +218,7 @@ class Transaksi extends ResourceController
         // 1. Verifikasi Kasir yang mengeksekusi pelunasan
         $header = $this->request->getServer('HTTP_AUTHORIZATION');
         if (!$header) return $this->failUnauthorized('Token tidak ditemukan.');
-        
+
         $token   = explode(' ', $header)[1];
         $key     = getenv('JWT_SECRET');
         $decoded = JWT::decode($token, new Key($key, 'HS256'));
@@ -215,5 +255,195 @@ class Transaksi extends ResourceController
                 'status_baru'  => 'Lunas'
             ]
         ]);
+    }
+    public function riwayat()
+    {
+        // 1. Verifikasi User
+        $header = $this->request->getServer('HTTP_AUTHORIZATION');
+        if (!$header) return $this->failUnauthorized('Token tidak ditemukan.');
+
+        $token   = explode(' ', $header)[1];
+        $key     = getenv('JWT_SECRET');
+        $decoded = JWT::decode($token, new Key($key, 'HS256'));
+        $role    = $decoded->role;
+        $idKasir = $decoded->uid;
+
+        $model = new TransaksiModel();
+
+        // 2. Tangkap parameter filter & Pagination dari Flutter
+        $tanggal = $this->request->getGet('tanggal');
+        $status  = $this->request->getGet('status');
+
+        // ✨ SETUP PAGINATION: Default Halaman 1, Tampilkan 10 Data per Halaman
+        $page   = (int) ($this->request->getGet('page') ?? 1);
+        $limit  = (int) ($this->request->getGet('limit') ?? 10);
+        $offset = ($page - 1) * $limit;
+
+        // 3. Bangun Query
+        $builder = $model->builder();
+        $builder->select('transaksi.*, users.nama_lengkap as nama_kasir');
+        $builder->join('users', 'users.id_user = transaksi.id_user', 'left');
+
+        // 🛡️ LOGIKA VISIBILITAS AKSES (KASIR VS OWNER)
+        // Jika yang login Kasir, HANYA tampilkan transaksi yang dia buat sendiri.
+        // Jika Owner/Admin, blok kode ini dilewati (bisa melihat transaksi semua kasir).
+        if ($role === 'Kasir') {
+            $builder->where('transaksi.id_user', $idKasir);
+        }
+
+        // Filter tanggal
+        if (!empty($tanggal)) {
+            $builder->like('transaksi.tanggal_transaksi', $tanggal, 'after');
+        }
+
+        // Filter status
+        if (!empty($status)) {
+            $builder->where('transaksi.status_pembayaran', ucfirst(strtolower($status)));
+        }
+
+        // ✨ HITUNG TOTAL DATA SEBELUM DI-LIMIT (Untuk Informasi Pagination Frontend)
+        // Parameter 'false' sangat penting agar kondisi where tidak di-reset oleh CI4
+        $totalData  = $builder->countAllResults(false);
+        $totalPages = ceil($totalData / $limit);
+
+        // 4. Eksekusi Query dengan Limit & Offset
+        $builder->orderBy('transaksi.tanggal_transaksi', 'DESC');
+        $builder->limit($limit, $offset);
+        $data = $builder->get()->getResultArray();
+
+        // 5. Kembalikan Response Terstruktur
+        return $this->respond([
+            'status'  => 200,
+            'message' => 'Riwayat transaksi berhasil dimuat.',
+            'pagination' => [
+                'current_page' => $page,
+                'limit'        => $limit,
+                'total_data'   => $totalData,
+                'total_pages'  => $totalPages,
+                'has_next'     => $page < $totalPages // Memudahkan Flutter cek halaman selanjutnya
+            ],
+            'data'    => $data
+        ]);
+    }
+    public function lanjutkanPembayaran($id = null)
+    {
+        // 1. Verifikasi User (Kasir)
+        $header = $this->request->getServer('HTTP_AUTHORIZATION');
+        if (!$header) return $this->failUnauthorized('Token tidak ditemukan.');
+
+        $token   = explode(' ', $header)[1];
+        $key     = getenv('JWT_SECRET');
+        $decoded = JWT::decode($token, new Key($key, 'HS256'));
+        $idKasir = $decoded->uid;
+
+        $json = $this->request->getJSON();
+        if (!$json || empty($json->details)) {
+            return $this->fail('Keranjang belanja kosong atau data tidak valid.', 400);
+        }
+
+        $transaksiModel = new TransaksiModel();
+        $detailModel = new DetailTransaksiModel();
+        $logModel = new \App\Models\LogAktivitasModel();
+
+        // 2. Cek apakah transaksi ada dan statusnya masih bisa diedit
+        $transaksiLama = $transaksiModel->find($id);
+        if (!$transaksiLama) {
+            return $this->failNotFound('Transaksi tidak ditemukan.');
+        }
+
+        if ($transaksiLama['status_pembayaran'] === 'Lunas') {
+            return $this->fail('Transaksi sudah lunas, tidak dapat diubah.', 400);
+        }
+
+        $db = Database::connect();
+        $db->transStart();
+
+        try {
+            $namaPelangganInput = $json->nama_pelanggan ?? $transaksiLama['nama_pelanggan'];
+            $metodePembayaranInput = $json->metode_pembayaran ?? 'Tunai';
+
+            // Menentukan status berdasarkan metode (Jika Tunai langsung Lunas, jika Online jadi Pending nunggu webhook)
+            $statusPembayaran = 'Pending';
+            if (strtolower($metodePembayaranInput) === 'tunai') {
+                $statusPembayaran = 'Lunas';
+            }
+
+            // 3. Update Data Transaksi Induk
+            $dataUpdate = [
+                'nama_pelanggan'    => $namaPelangganInput,
+                'total_harga'       => $json->total_harga,
+                'uang_diterima'     => $json->uang_diterima ?? 0,
+                'kembalian'         => $json->kembalian ?? 0,
+                'metode_pembayaran' => $metodePembayaranInput,
+                'status_pembayaran' => $statusPembayaran,
+                // Kita bisa membiarkan tanggal_transaksi tetap, atau di-update ke waktu pelunasan
+                // 'tanggal_transaksi' => date('Y-m-d H:i:s') 
+            ];
+            $transaksiModel->update($id, $dataUpdate);
+
+            // 4. Hapus Detail Lama & Masukkan Detail Baru (Support update keranjang)
+            $db->table('detail_transaksi')->where('id_transaksi', $id)->delete();
+
+            $dataDetailSiapInsert = [];
+            foreach ($json->details as $item) {
+                $dataDetailSiapInsert[] = [
+                    'id_transaksi'     => $id,
+                    'id_produk'        => $item->id_produk,
+                    'kuantitas_produk' => $item->kuantitas_produk,
+                    'harga_transaksi'  => $item->harga_transaksi,
+                    'subtotal'         => $item->subtotal
+                ];
+            }
+            $detailModel->insertBatch($dataDetailSiapInsert);
+
+            // 5. Catat ke Log
+            $logModel->insert([
+                'id_user'    => $idKasir,
+                'aksi'       => 'LANJUTKAN_PEMBAYARAN',
+                'keterangan' => 'Memproses pelunasan invoice: ' . $transaksiLama['kode_invoice'] . ' via ' . $metodePembayaranInput
+            ]);
+
+            $db->transComplete();
+
+            if ($db->transStatus() === false) {
+                return $this->fail('Gagal memperbarui transaksi di database.', 500);
+            }
+
+            // =========================================================
+            // 🚀 INTEGRASI MIDTRANS JIKA KASIR MEMILIH "ONLINE"
+            // =========================================================
+            $snapToken = null;
+            $metodeMidtrans = ['online', 'qris', 'transfer', 'midtrans'];
+
+            if (in_array(strtolower($metodePembayaranInput), $metodeMidtrans)) {
+                Config::$serverKey = getenv('MIDTRANS_SERVER_KEY');
+                Config::$isProduction = getenv('MIDTRANS_IS_PRODUCTION') === 'true';
+                Config::$isSanitized = true;
+                Config::$is3ds = true;
+
+                $params = [
+                    'transaction_details' => [
+                        'order_id'     => $transaksiLama['kode_invoice'],
+                        'gross_amount' => $json->total_harga,
+                    ],
+                    'customer_details' => [
+                        'first_name' => $namaPelangganInput,
+                    ]
+                ];
+
+                $snapToken = Snap::getSnapToken($params);
+            }
+
+            return $this->respond([
+                'status'       => 200,
+                'message'      => 'Pembayaran berhasil diproses!',
+                'kode_invoice' => $transaksiLama['kode_invoice'],
+                'id_transaksi' => $id,
+                'snap_token'   => $snapToken // 👈 Jika tidak null, Flutter akan membuka pop-up Midtrans
+            ]);
+        } catch (\Exception $e) {
+            $db->transRollback();
+            return $this->fail($e->getMessage(), 400);
+        }
     }
 }

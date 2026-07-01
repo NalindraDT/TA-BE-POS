@@ -11,13 +11,17 @@ class TransaksiModel extends Model
     protected $useAutoIncrement = true;
     protected $returnType       = 'array';
 
+    // --- TAMBAH 'uang_diterima' dan 'kembalian' DI SINI ---
     protected $allowedFields    = [
         'id_user',
         'kode_invoice',
         'nama_pelanggan',
         'total_harga',
+        'uang_diterima',      // <-- Kolom Baru
+        'kembalian',          // <-- Kolom Baru
         'metode_pembayaran',
         'status_pembayaran',
+        'snap_token',
         'tanggal_transaksi'
     ];
 

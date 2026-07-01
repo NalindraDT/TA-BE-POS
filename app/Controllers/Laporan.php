@@ -12,7 +12,6 @@ class Laporan extends ResourceController
 {
     protected $format = 'json';
 
-    // Helper untuk mengambil data user dari Token JWT
     private function getLoggedInUser()
     {
         $header = $this->request->getServer('HTTP_AUTHORIZATION');
@@ -39,13 +38,18 @@ class Laporan extends ResourceController
             return $this->failForbidden('Akses ditolak. Kasir tidak diizinkan melihat laporan ini.');
         }
 
-        // Tangkap Parameter dari Flutter
         $periode = $this->request->getGet('periode') ?? 'bulan';
-        $id_kasir = $this->request->getGet('id_kasir'); // Filter dinamis kasir
+        $id_kasir = $this->request->getGet('id_kasir');
         
+        $status_pembayaran = $this->request->getGet('status');
+        
+        // ✨ SETUP PAGINATION
+        $page   = (int) ($this->request->getGet('page') ?? 1);
+        $limit  = (int) ($this->request->getGet('limit') ?? 10);
+        $offset = ($page - 1) * $limit;
+
         $db = Database::connect();
         
-        // Atur Filter Tanggal SQL
         $whereTanggal = "";
         if ($periode === 'hari') {
             $whereTanggal = "DATE(transaksi.tanggal_transaksi) = CURRENT_DATE()";
@@ -59,7 +63,7 @@ class Laporan extends ResourceController
         
         try {
             // ==========================================================
-            // KONTEN 1: HITUNG RINGKASAN REVENUE SHARING (DINAMIS)
+            // KONTEN 1: HITUNG RINGKASAN REVENUE SHARING 
             // ==========================================================
             $builderRingkasan = $db->table('detail_transaksi')
                 ->select('
@@ -68,13 +72,20 @@ class Laporan extends ResourceController
                 ')
                 ->join('transaksi', 'transaksi.id_transaksi = detail_transaksi.id_transaksi')
                 ->join('produk', 'produk.id_produk = detail_transaksi.id_produk')
-                ->join('users as kasir', 'kasir.id_user = transaksi.id_user', 'left') // Ambil data persentase dari kasir pembuat transaksi
+                ->join('users as kasir', 'kasir.id_user = transaksi.id_user', 'left')
                 ->where('produk.id_user', $id_owner)
                 ->where($whereTanggal);
 
-            // Jika Owner memilih filter Kasir tertentu di Flutter
             if (!empty($id_kasir)) {
                 $builderRingkasan->where('transaksi.id_user', $id_kasir);
+            }
+
+            if (!empty($status_pembayaran)) {
+                // Jika dropdown filter status ditekan (misal Owner sengaja mau ngecek total uang ngadat/Pending)
+                $builderRingkasan->where('transaksi.status_pembayaran', $status_pembayaran);
+            } else {
+                // JIKA DEFAULT (Semua Status), MAKA YANG DIHITUNG SEBAGAI OMSET HANYALAH YANG "LUNAS" SAJA!
+                $builderRingkasan->where('transaksi.status_pembayaran', 'Lunas');
             }
 
             $queryRingkasan = $builderRingkasan->get()->getRowArray();
@@ -84,26 +95,34 @@ class Laporan extends ResourceController
             $pemasukanOwner = $totalOmset - $bagiHasilKasir;
 
             // ==========================================================
-            // KONTEN 2: STATISTIK PRODUK TERJUAL
+            // KONTEN 2: RIWAYAT TRANSAKSI DENGAN PAGINATION
             // ==========================================================
-            $builderStatistik = $db->table('detail_transaksi')
-                // 🛡️ TAMBAHKAN produk.gambar_produk DI DALAM SELECT
-                ->select('produk.nama_produk, produk.gambar_produk, SUM(detail_transaksi.kuantitas_produk) as total_terjual, SUM(detail_transaksi.subtotal) as total_pendapatan')
-                ->join('transaksi', 'transaksi.id_transaksi = detail_transaksi.id_transaksi')
+            $builderRiwayat = $db->table('transaksi')
+                // 🔥 UBAH total_harga MENJADI SUM(subtotal) agar nominal struk sesuai dengan barang si owner saja
+                ->select('transaksi.id_transaksi, transaksi.kode_invoice, transaksi.nama_pelanggan, transaksi.status_pembayaran, transaksi.metode_pembayaran, transaksi.tanggal_transaksi, kasir.nama_lengkap as nama_kasir, SUM(detail_transaksi.subtotal) as total_harga_owner')
+                ->join('detail_transaksi', 'detail_transaksi.id_transaksi = transaksi.id_transaksi')
                 ->join('produk', 'produk.id_produk = detail_transaksi.id_produk')
+                ->join('users as kasir', 'kasir.id_user = transaksi.id_user', 'left')
                 ->where('produk.id_user', $id_owner)
                 ->where($whereTanggal)
-                ->groupBy('detail_transaksi.id_produk')
-                ->orderBy('total_terjual', 'DESC');
+                ->groupBy('transaksi.id_transaksi') 
+                ->orderBy('transaksi.tanggal_transaksi', 'DESC');
 
-            // Terapkan filter kasir ke statistik juga jika ada
             if (!empty($id_kasir)) {
-                $builderStatistik->where('transaksi.id_user', $id_kasir);
+                $builderRiwayat->where('transaksi.id_user', $id_kasir);
             }
 
-            $statistikProduk = $builderStatistik->get()->getResultArray();
+            if (!empty($status_pembayaran)) {
+                $builderRiwayat->where('transaksi.status_pembayaran', $status_pembayaran);
+            }
 
-            // Kembalikan Response sesuai dengan layout UI Card di Figma
+            // Hitung total data untuk meta pagination
+            $totalDataRiwayat = $builderRiwayat->countAllResults(false);
+            $totalPages = ceil($totalDataRiwayat / $limit);
+
+            // Eksekusi data dengan limit
+            $riwayatTransaksi = $builderRiwayat->limit($limit, $offset)->get()->getResultArray();
+
             return $this->respond([
                 'status'    => 200,
                 'message'   => 'Laporan berhasil dimuat',
@@ -111,13 +130,18 @@ class Laporan extends ResourceController
                     'periode'  => $periode,
                     'id_kasir' => $id_kasir ?? 'Semua Kasir'
                 ],
+                'pagination' => [
+                    'current_page' => $page,
+                    'total_pages'  => $totalPages,
+                    'total_data'   => $totalDataRiwayat
+                ],
                 'data'      => [
                     'ringkasan_keuangan' => [
                         'pemasukan_owner'  => $pemasukanOwner,
                         'total_omset'      => $totalOmset,
                         'bagi_hasil_kasir' => $bagiHasilKasir
                     ],
-                    'statistik_produk' => $statistikProduk
+                    'riwayat_transaksi' => $riwayatTransaksi 
                 ]
             ]);
 

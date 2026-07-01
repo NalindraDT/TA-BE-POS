@@ -25,8 +25,8 @@ class ProdukModel extends Model
     protected $createdField     = 'created_at';
     protected $updatedField     = 'updated_at';
 
-    // Tambahkan $role = null di dalam kurung parameter
-    public function getProdukLengkap($id_produk = null, $id_kategori = null, $id_owner = null, $role = null)
+    // ✨ Tambahkan $keyword = null di dalam kurung parameter
+    public function getProdukLengkap($id_produk = null, $id_kategori = null, $id_owner = null, $role = null, $keyword = null)
     {
         $builder = $this->db->table('produk');
         $builder->select('produk.*, kategori.nama_kategori');
@@ -34,9 +34,17 @@ class ProdukModel extends Model
 
         // 🛡️ LOGIKA VISIBILITAS CERDAS 
         // Jika yang akses adalah Kasir, sembunyikan produk yang is_active = 0
-        // Jika yang akses Owner/Admin, kode ini dilewati (semua produk muncul)
         if ($role === 'Kasir') {
             $builder->where('produk.is_active', 1);
+        }
+
+        // 🛡️ PERLINDUNGAN SOFT DELETE
+        // Pastikan produk yang sudah dihapus (deleted_at tidak null) tidak ikut muncul
+        $builder->where('produk.deleted_at', null);
+
+        // ✨ LOGIKA PENCARIAN BERDASARKAN NAMA PRODUK
+        if ($keyword != null) {
+            $builder->like('produk.nama_produk', $keyword);
         }
 
         if ($id_produk != null) {
@@ -51,6 +59,9 @@ class ProdukModel extends Model
         if ($id_owner != null) {
             $builder->where('produk.id_user', $id_owner);
         }
+
+        // Urutkan berdasarkan yang paling baru dibuat
+        $builder->orderBy('produk.created_at', 'DESC');
 
         return $builder->get()->getResultArray();
     }

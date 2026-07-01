@@ -27,54 +27,6 @@ class Payment extends ResourceController
         Config::$is3ds = true;
     }
 
-    public function createTransaction()
-    {
-        // 1. Verifikasi Token Kasir (Keamanan Dasar)
-        $header = $this->request->getServer('HTTP_AUTHORIZATION');
-        if (!$header) return $this->failUnauthorized('Token tidak ditemukan.');
-        
-        $json = $this->request->getJSON();
-        if (!$json || empty($json->total_harga)) {
-            return $this->fail('Data transaksi tidak lengkap.', 400);
-        }
-
-        // Tangkap nama pelanggan dari Flutter (jika kosong, beri nilai default)
-        $namaPelanggan = $json->nama_pelanggan ?? 'Pelanggan Umum';
-
-        // 3. Buat Order ID Unik
-        $orderId = 'INV-' . time();
-        $grossAmount = $json->total_harga; 
-
-        // 4. Siapkan Parameter untuk Midtrans
-        $params = [
-            'transaction_details' => [
-                'order_id'     => $orderId,
-                'gross_amount' => $grossAmount,
-            ],
-            'customer_details' => [
-                'first_name' => $namaPelanggan, // 👈 Nama ini akan muncul di layar Midtrans
-                'last_name'  => '', // Dikosongkan tidak masalah
-            ]
-        ];
-
-        try {
-            // 5. Minta Snap Token ke Server Midtrans
-            $snapToken = Snap::getSnapToken($params);
-
-            // 6. Kembalikan Token ke Flutter
-            return $this->respond([
-                'status'  => 200,
-                'message' => 'Snap Token berhasil didapatkan',
-                'data'    => [
-                    'order_id'   => $orderId,
-                    'snap_token' => $snapToken
-                ]
-            ]);
-
-        } catch (\Exception $e) {
-            return $this->fail($e->getMessage(), 500);
-        }
-    }
     public function webhook()
     {
         // 1. Set Kunci Konfigurasi Midtrans
@@ -84,13 +36,13 @@ class Payment extends ResourceController
         try {
             // 2. Tangkap Notifikasi dari Midtrans
             $notif = new \Midtrans\Notification();
-            
+
             $transactionStatus = $notif->transaction_status;
-            $paymentType = $notif->payment_type;
+            $paymentType = $notif->payment_type; // Isinya: 'qris', 'bank_transfer', 'echannel', dll
             $orderId = $notif->order_id;
             $fraudStatus = $notif->fraud_status;
 
-            // 3. Cari Transaksi di Database berdasarkan Order ID (Kode Invoice)
+            // 3. Cari Transaksi di Database berdasarkan Order ID
             $model = new \App\Models\TransaksiModel();
             $transaksi = $model->where('kode_invoice', $orderId)->first();
 
@@ -98,46 +50,51 @@ class Payment extends ResourceController
                 return $this->failNotFound('Transaksi tidak ditemukan.');
             }
 
-            // 4. Logika Perubahan Status
+            // 4. Logika Perubahan Status (Sync dengan Dashboard Midtrans)
             $statusBaru = $transaksi['status_pembayaran'];
 
-            if ($transactionStatus == 'capture') {
-                if ($paymentType == 'credit_card') {
-                    if ($fraudStatus == 'challenge') {
-                        $statusBaru = 'Pending';
-                    } else {
-                        $statusBaru = 'Lunas';
-                    }
-                }
-            } else if ($transactionStatus == 'settlement') {
-                // Settlement artinya uang sudah masuk ke kantong (Berhasil)
+            if ($transactionStatus == 'settlement' || $transactionStatus == 'capture') {
                 $statusBaru = 'Lunas';
-            } else if ($transactionStatus == 'cancel' || $transactionStatus == 'deny' || $transactionStatus == 'expire') {
-                // Jika batal, ditolak, atau kadaluarsa (misal lewat dari 15 menit)
+            } else if ($transactionStatus == 'expire') {
+                $statusBaru = 'Expired'; // 👈 Mengikuti status Expired Midtrans
+            } else if ($transactionStatus == 'cancel' || $transactionStatus == 'deny') {
                 $statusBaru = 'Batal';
             } else if ($transactionStatus == 'pending') {
                 $statusBaru = 'Pending';
             }
 
-            // 5. Eksekusi Update ke Database jika status berubah
-            if ($statusBaru !== $transaksi['status_pembayaran']) {
-                $model->update($transaksi['id_transaksi'], ['status_pembayaran' => $statusBaru]);
+            // 5. Rapikan Nama Metode Pembayaran dari Midtrans
+            // Contoh: 'bank_transfer' -> 'BANK TRANSFER', 'qris' -> 'QRIS'
+            $metodeBaru = strtoupper(str_replace('_', ' ', $paymentType));
 
-                // Opsional: Catat otomatis ke Log Aktivitas oleh Sistem
-                $logModel = new \App\Models\LogAktivitasModel();
-                $logModel->insert([
-                    'id_user'    => $transaksi['id_user'], // Menggunakan ID Kasir yang buat transaksi
-                    'aksi'       => 'PEMBAYARAN_OTOMATIS',
-                    'keterangan' => 'Sistem Midtrans mengonfirmasi pelunasan tagihan via ' . strtoupper($paymentType) . ' untuk invoice: ' . $orderId
+            // 6. Eksekusi Update ke Database (Update Status DAN Metode)
+            // Jika transaksi bukan Tunai, timpa metode pembayarannya dengan data akurat dari Midtrans
+            if ($transaksi['metode_pembayaran'] !== 'Tunai') {
+                $model->update($transaksi['id_transaksi'], [
+                    'status_pembayaran' => $statusBaru,
+                    'metode_pembayaran' => $metodeBaru
+                ]);
+            } else {
+                // Jika aslinya Tunai, cukup update statusnya saja (jaga-jaga)
+                $model->update($transaksi['id_transaksi'], [
+                    'status_pembayaran' => $statusBaru
                 ]);
             }
 
-            // 6. Beri respon 200 OK ke Midtrans agar mereka berhenti mengirim notifikasi
+            // 7. Catat ke Log Aktivitas
+            if ($statusBaru !== $transaksi['status_pembayaran']) {
+                $logModel = new \App\Models\LogAktivitasModel();
+                $logModel->insert([
+                    'id_user'    => $transaksi['id_user'],
+                    'aksi'       => 'UPDATE_STATUS_MIDTRANS',
+                    'keterangan' => "Midtrans mengonfirmasi status menjadi $statusBaru via $metodeBaru untuk invoice: $orderId"
+                ]);
+            }
+
             return $this->respond([
-                'status' => 200, 
+                'status' => 200,
                 'message' => 'Notifikasi Midtrans berhasil diproses'
             ]);
-
         } catch (\Exception $e) {
             return $this->fail('Gagal memproses notifikasi: ' . $e->getMessage(), 500);
         }
