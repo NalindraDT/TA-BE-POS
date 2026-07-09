@@ -99,13 +99,23 @@ class Produk extends ResourceController
 
         $rules = [
             'id_kategori'   => 'required|numeric',
-            'nama_produk'   => 'required|string',
+            'nama_produk'   => 'required|string|is_unique[produk.nama_produk]',
             'harga'         => 'required|numeric',
             'gambar_produk' => 'uploaded[gambar_produk]|max_size[gambar_produk,2048]|is_image[gambar_produk]|mime_in[gambar_produk,image/jpg,image/jpeg,image/png]'
         ];
+        $messages = [
+            'nama_produk' => [
+                'required'  => 'Nama produk wajib diisi.',
+                'is_unique' => 'Gagal! Nama produk ini sudah ada di etalase. Silakan gunakan nama lain (misal: "Nasi Goreng Spesial").'
+            ]
+        ];
 
-        if (!$this->validate($rules)) {
-            return $this->failValidationErrors($this->validator->getErrors());
+        if (!$this->validate($rules, $messages)) {
+            $errors = $this->validator->getErrors();
+            return $this->respond([
+                'status'  => 400,
+                'message' => reset($errors)
+            ], 400);
         } else {
             $fileGambar = $this->request->getFile('gambar_produk');
             $namaGambar = $fileGambar->getRandomName();
@@ -157,16 +167,32 @@ class Produk extends ResourceController
             return $this->failForbidden('Akses ditolak! Ini bukan produk milik Anda.');
         }
 
-        // 🧹 is_active sudah dihapus dari rules
+        // 1. Tetapkan rules HANYA untuk teks terlebih dahulu (gambar_produk jangan dimasukkan ke sini)
         $rules = [
             'id_kategori'   => 'permit_empty|numeric',
-            'nama_produk'   => 'permit_empty|string',
+            'nama_produk'   => "permit_empty|string|is_unique[produk.nama_produk,id_produk,{$id}]",
             'harga'         => 'permit_empty|numeric',
-            'gambar_produk' => 'max_size[gambar_produk,2048]|is_image[gambar_produk]|mime_in[gambar_produk,image/jpg,image/jpeg,image/png]'
+        ];
+        $messages = [
+            'nama_produk' => [
+                'is_unique' => 'Gagal! Nama produk ini sudah dipakai oleh produk lain.'
+            ]
         ];
 
-        if (!$this->validate($rules)) {
-            return $this->failValidationErrors($this->validator->getErrors());
+        // 2. Tangkap file gambar (jika ada)
+        $fileGambar = $this->request->getFile('gambar_produk');
+
+        // 3. LOGIKA DINAMIS: Tambahkan rules gambar HANYA JIKA owner mengupload file baru yang valid
+        if ($fileGambar && $fileGambar->isValid()) {
+            $rules['gambar_produk'] = 'max_size[gambar_produk,2048]|is_image[gambar_produk]|mime_in[gambar_produk,image/jpg,image/jpeg,image/png]';
+        }
+
+        if (!$this->validate($rules, $messages)) {
+            $errors = $this->validator->getErrors();
+            return $this->respond([
+                'status'  => 400,
+                'message' => reset($errors)
+            ], 400);
         } else {
             $data = [
                 'id_kategori' => $this->request->getVar('id_kategori') ?? $produkLama['id_kategori'],
@@ -174,10 +200,10 @@ class Produk extends ResourceController
                 'harga'       => $this->request->getVar('harga') ?? $produkLama['harga'],
             ];
 
-            $fileGambar = $this->request->getFile('gambar_produk');
-
+            // 4. Eksekusi upload gambar HANYA JIKA ada file baru
             if ($fileGambar && $fileGambar->isValid() && !$fileGambar->hasMoved()) {
-                if ($produkLama['gambar_produk'] && file_exists('uploads/produk/' . $produkLama['gambar_produk'])) {
+                // Hapus gambar lama agar memori server tidak penuh
+                if (!empty($produkLama['gambar_produk']) && file_exists('uploads/produk/' . $produkLama['gambar_produk'])) {
                     unlink('uploads/produk/' . $produkLama['gambar_produk']);
                 }
 
@@ -186,9 +212,10 @@ class Produk extends ResourceController
                 $data['gambar_produk'] = $namaGambar;
             }
 
+            // Simpan perubahan ke database
             $model->update($id, $data);
 
-            // 📝 LOGIKA PENCATATAN LOG HANYA UNTUK UPDATE BIASA
+            // 📝 Pencatatan Log Aktivitas
             $logModel = new \App\Models\LogAktivitasModel();
             $logModel->insert([
                 'id_user'    => $user['id_user'],

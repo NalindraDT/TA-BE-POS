@@ -113,6 +113,19 @@ class Transaksi extends ResourceController
             return $this->fail('Keranjang belanja kosong atau data tidak valid.', 400);
         }
 
+        // ✨ 1. TANGKAP WAKTU PEMBAYARAN DAN VALIDASI NAMA
+        $waktuPembayaran = $json->waktu_pembayaran ?? 'sekarang'; // 'sekarang' atau 'nanti'
+        $namaPelangganInput = $json->nama_pelanggan ?? '';
+
+        if ($waktuPembayaran === 'nanti' && trim($namaPelangganInput) === '') {
+            return $this->fail('Nama pelanggan WAJIB diisi jika pesanan disimpan untuk dibayar nanti.', 400);
+        }
+
+        // Jika tidak diisi (dan bayar sekarang), beri default
+        if (trim($namaPelangganInput) === '') {
+            $namaPelangganInput = 'Pelanggan Umum';
+        }
+
         $transaksiModel = new TransaksiModel();
         $detailModel = new DetailTransaksiModel();
         $logModel = new \App\Models\LogAktivitasModel();
@@ -121,11 +134,11 @@ class Transaksi extends ResourceController
         $db->transStart();
 
         try {
-            $namaPelangganInput = $json->nama_pelanggan ?? 'Pelanggan Umum';
             $metodePembayaranInput = $json->metode_pembayaran ?? 'Tunai';
 
+            // ✨ 2. TENTUKAN STATUS BERDASARKAN WAKTU PEMBAYARAN
             $statusPembayaran = 'Pending';
-            if (strtolower($metodePembayaranInput) === 'tunai') {
+            if ($waktuPembayaran === 'sekarang' && strtolower($metodePembayaranInput) === 'tunai') {
                 $statusPembayaran = 'Lunas';
             }
 
@@ -136,7 +149,7 @@ class Transaksi extends ResourceController
                 'total_harga'       => $json->total_harga,
                 'uang_diterima'     => $json->uang_diterima ?? 0,
                 'kembalian'         => $json->kembalian ?? 0,
-                'metode_pembayaran' => $metodePembayaranInput,
+                'metode_pembayaran' => ($waktuPembayaran === 'nanti') ? 'Belum Dipilih' : $metodePembayaranInput,
                 'status_pembayaran' => $statusPembayaran,
                 'tanggal_transaksi' => date('Y-m-d H:i:s')
             ];
@@ -160,7 +173,7 @@ class Transaksi extends ResourceController
             $logModel->insert([
                 'id_user'    => $idKasir,
                 'aksi'       => 'BUAT_TRANSAKSI',
-                'keterangan' => 'Membuat transaksi ' . $metodePembayaranInput . ' a.n ' . $namaPelangganInput . ' (' . $dataTransaksi['kode_invoice'] . ')'
+                'keterangan' => 'Membuat transaksi (Status: '.$statusPembayaran.') a.n ' . $namaPelangganInput . ' (' . $dataTransaksi['kode_invoice'] . ')'
             ]);
 
             $db->transComplete();
@@ -169,13 +182,11 @@ class Transaksi extends ResourceController
                 return $this->fail('Gagal menyimpan transaksi ke database.', 500);
             }
 
-            // =========================================================
-            // 🚀 INTEGRASI MIDTRANS OTOMATIS JIKA BUKAN TUNAI
-            // =========================================================
+            // ✨ 3. PANGGIL MIDTRANS HANYA JIKA "BAYAR SEKARANG" DAN BUKAN TUNAI
             $snapToken = null;
             $metodeMidtrans = ['online', 'qris', 'transfer', 'midtrans'];
 
-            if (in_array(strtolower($metodePembayaranInput), $metodeMidtrans)) {
+            if ($waktuPembayaran === 'sekarang' && in_array(strtolower($metodePembayaranInput), $metodeMidtrans)) {
                 Config::$serverKey = getenv('MIDTRANS_SERVER_KEY');
                 Config::$isProduction = getenv('MIDTRANS_IS_PRODUCTION') === 'true';
                 Config::$isSanitized = true;
@@ -191,16 +202,13 @@ class Transaksi extends ResourceController
                     ]
                 ];
 
-                // 1. Dapatkan token dari Midtrans
                 $snapToken = Snap::getSnapToken($params);
 
-                // 2. 🔥 UPDATE DATABASE: Simpan snap_token ke invoice yang baru dibuat
                 $transaksiModel->update($idTransaksiBaru, [
                     'snap_token' => $snapToken
                 ]);
             }
 
-            // 3. Pastikan snap_token ikut dikembalikan ke Flutter dalam response
             return $this->respondCreated([
                 'status'       => 201,
                 'message'      => 'Transaksi berhasil disimpan!',
@@ -284,9 +292,6 @@ class Transaksi extends ResourceController
         $builder->select('transaksi.*, users.nama_lengkap as nama_kasir');
         $builder->join('users', 'users.id_user = transaksi.id_user', 'left');
 
-        // 🛡️ LOGIKA VISIBILITAS AKSES (KASIR VS OWNER)
-        // Jika yang login Kasir, HANYA tampilkan transaksi yang dia buat sendiri.
-        // Jika Owner/Admin, blok kode ini dilewati (bisa melihat transaksi semua kasir).
         if ($role === 'Kasir') {
             $builder->where('transaksi.id_user', $idKasir);
         }
@@ -327,7 +332,6 @@ class Transaksi extends ResourceController
     }
     public function lanjutkanPembayaran($id = null)
     {
-        // 1. Verifikasi User (Kasir)
         $header = $this->request->getServer('HTTP_AUTHORIZATION');
         if (!$header) return $this->failUnauthorized('Token tidak ditemukan.');
 
@@ -345,7 +349,6 @@ class Transaksi extends ResourceController
         $detailModel = new DetailTransaksiModel();
         $logModel = new \App\Models\LogAktivitasModel();
 
-        // 2. Cek apakah transaksi ada dan statusnya masih bisa diedit
         $transaksiLama = $transaksiModel->find($id);
         if (!$transaksiLama) {
             return $this->failNotFound('Transaksi tidak ditemukan.');
@@ -362,13 +365,11 @@ class Transaksi extends ResourceController
             $namaPelangganInput = $json->nama_pelanggan ?? $transaksiLama['nama_pelanggan'];
             $metodePembayaranInput = $json->metode_pembayaran ?? 'Tunai';
 
-            // Menentukan status berdasarkan metode (Jika Tunai langsung Lunas, jika Online jadi Pending nunggu webhook)
             $statusPembayaran = 'Pending';
             if (strtolower($metodePembayaranInput) === 'tunai') {
                 $statusPembayaran = 'Lunas';
             }
 
-            // 3. Update Data Transaksi Induk
             $dataUpdate = [
                 'nama_pelanggan'    => $namaPelangganInput,
                 'total_harga'       => $json->total_harga,
@@ -376,12 +377,9 @@ class Transaksi extends ResourceController
                 'kembalian'         => $json->kembalian ?? 0,
                 'metode_pembayaran' => $metodePembayaranInput,
                 'status_pembayaran' => $statusPembayaran,
-                // Kita bisa membiarkan tanggal_transaksi tetap, atau di-update ke waktu pelunasan
-                // 'tanggal_transaksi' => date('Y-m-d H:i:s') 
             ];
             $transaksiModel->update($id, $dataUpdate);
 
-            // 4. Hapus Detail Lama & Masukkan Detail Baru (Support update keranjang)
             $db->table('detail_transaksi')->where('id_transaksi', $id)->delete();
 
             $dataDetailSiapInsert = [];
@@ -396,7 +394,6 @@ class Transaksi extends ResourceController
             }
             $detailModel->insertBatch($dataDetailSiapInsert);
 
-            // 5. Catat ke Log
             $logModel->insert([
                 'id_user'    => $idKasir,
                 'aksi'       => 'LANJUTKAN_PEMBAYARAN',
@@ -409,9 +406,6 @@ class Transaksi extends ResourceController
                 return $this->fail('Gagal memperbarui transaksi di database.', 500);
             }
 
-            // =========================================================
-            // 🚀 INTEGRASI MIDTRANS JIKA KASIR MEMILIH "ONLINE"
-            // =========================================================
             $snapToken = null;
             $metodeMidtrans = ['online', 'qris', 'transfer', 'midtrans'];
 
@@ -421,9 +415,13 @@ class Transaksi extends ResourceController
                 Config::$isSanitized = true;
                 Config::$is3ds = true;
 
+                // ✨ SOLUSI KONFLIK MIDTRANS (Gunakan underscore + timestamp agar unik di mata Midtrans)
+                // Contoh: INV-20260706-001_1718293812
+                $midtransOrderId = $transaksiLama['kode_invoice'] . '_' . time();
+
                 $params = [
                     'transaction_details' => [
-                        'order_id'     => $transaksiLama['kode_invoice'],
+                        'order_id'     => $midtransOrderId, 
                         'gross_amount' => $json->total_harga,
                     ],
                     'customer_details' => [
@@ -432,6 +430,9 @@ class Transaksi extends ResourceController
                 ];
 
                 $snapToken = Snap::getSnapToken($params);
+                
+                // Simpan token baru ke database
+                $transaksiModel->update($id, ['snap_token' => $snapToken]);
             }
 
             return $this->respond([
@@ -439,7 +440,7 @@ class Transaksi extends ResourceController
                 'message'      => 'Pembayaran berhasil diproses!',
                 'kode_invoice' => $transaksiLama['kode_invoice'],
                 'id_transaksi' => $id,
-                'snap_token'   => $snapToken // 👈 Jika tidak null, Flutter akan membuka pop-up Midtrans
+                'snap_token'   => $snapToken
             ]);
         } catch (\Exception $e) {
             $db->transRollback();

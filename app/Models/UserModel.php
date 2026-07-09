@@ -31,6 +31,8 @@ class UserModel extends Model
 
     protected $beforeInsert = ['hashPassword'];
     protected $beforeUpdate = ['hashPassword'];
+    protected $useSoftDeletes   = true;
+    protected $deletedField     = 'deleted_at';
 
 
     protected function hashPassword(array $data)

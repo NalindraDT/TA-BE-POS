@@ -29,18 +29,32 @@ class ProdukModel extends Model
     public function getProdukLengkap($id_produk = null, $id_kategori = null, $id_owner = null, $role = null, $keyword = null)
     {
         $builder = $this->db->table('produk');
-        $builder->select('produk.*, kategori.nama_kategori');
-        $builder->join('kategori', 'kategori.id_kategori = produk.id_kategori');
+        
+        // ✨ UBAH: Tambahkan pengambilan nama owner dari tabel users
+        $builder->select('produk.*, kategori.nama_kategori, users.nama_lengkap as nama_owner');
+        
+        // Pastikan pakai 'left' join untuk berjaga-jaga
+        $builder->join('kategori', 'kategori.id_kategori = produk.id_kategori', 'left');
+        
+        // ✨ TAMBAHAN: Join ke tabel users untuk mengecek status sang pembuat/owner
+        $builder->join('users', 'users.id_user = produk.id_user', 'left');
 
         // 🛡️ LOGIKA VISIBILITAS CERDAS 
-        // Jika yang akses adalah Kasir, sembunyikan produk yang is_active = 0
+        // Jika yang akses adalah Kasir, lakukan filter ketat
         if ($role === 'Kasir') {
+            // 1. Produknya sendiri harus aktif
             $builder->where('produk.is_active', 1);
+            
+            // ✨ 2. Owner-nya harus berstatus aktif (tidak dinonaktifkan Admin)
+            $builder->where('users.is_active', 1);
+            
+            // ✨ 3. Owner-nya belum dihapus (terlindungi dari soft-delete user)
+            $builder->where('users.deleted_at IS NULL');
         }
 
-        // 🛡️ PERLINDUNGAN SOFT DELETE
+        // 🛡️ PERLINDUNGAN SOFT DELETE PRODUK
         // Pastikan produk yang sudah dihapus (deleted_at tidak null) tidak ikut muncul
-        $builder->where('produk.deleted_at', null);
+        $builder->where('produk.deleted_at IS NULL');
 
         // ✨ LOGIKA PENCARIAN BERDASARKAN NAMA PRODUK
         if ($keyword != null) {
