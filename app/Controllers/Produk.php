@@ -249,6 +249,24 @@ class Produk extends ResourceController
             return $this->failForbidden('Akses ditolak! Anda tidak bisa menghapus produk Owner lain.');
         }
 
+        // ==========================================================
+        // 🔥 TAMBAHAN: Validasi PIN Keamanan Sebelum Menghapus
+        // ==========================================================
+        $json = $this->request->getJSON();
+        $pin = $json ? $json->pin : $this->request->getVar('pin');
+
+        if (empty($pin)) {
+            return $this->fail('PIN Keamanan wajib diisi untuk menghapus produk.', 400);
+        }
+
+        $userModel = new \App\Models\UserModel();
+        $userData = $userModel->find($user['id_user']);
+
+        if (empty($userData['pin_hash']) || !password_verify($pin, $userData['pin_hash'])) {
+            return $this->failUnauthorized('PIN Keamanan salah!');
+        }
+        // ==========================================================
+
         // 1. CI4 otomatis melakukan Soft Delete (mengisi kolom deleted_at)
         $model->delete($id);
 

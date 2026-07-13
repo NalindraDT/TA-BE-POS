@@ -447,4 +447,63 @@ class Transaksi extends ResourceController
             return $this->fail($e->getMessage(), 400);
         }
     }
+    public function cancelOrRefund($id = null)
+    {
+        // 1. Verifikasi User (Kasir yang mengeksekusi)
+        $header = $this->request->getServer('HTTP_AUTHORIZATION');
+        if (!$header) return $this->failUnauthorized('Token tidak ditemukan.');
+
+        $token   = explode(' ', $header)[1];
+        $key     = getenv('JWT_SECRET');
+        $decoded = JWT::decode($token, new Key($key, 'HS256'));
+        $idKasir = $decoded->uid;
+
+        $model = new TransaksiModel();
+        $transaksi = $model->find($id);
+
+        if (!$transaksi) {
+            return $this->failNotFound('Transaksi tidak ditemukan.');
+        }
+
+        // 2. Tentukan Logika Status
+        $statusLama = $transaksi['status_pembayaran'];
+        $statusBaru = '';
+        $aksiLog = '';
+        $keteranganLog = '';
+
+        if ($statusLama === 'Pending') {
+            // Jika belum dibayar lalu dibatalkan -> BATAL
+            $statusBaru = 'Batal';
+            $aksiLog = 'BATAL_TRANSAKSI';
+            $keteranganLog = 'Membatalkan transaksi yang belum dibayar untuk invoice: ' . $transaksi['kode_invoice'];
+        } else if ($statusLama === 'Lunas') {
+            // Jika sudah terbayar lalu dibatalkan -> REFUND
+            $statusBaru = 'Refund';
+            $aksiLog = 'REFUND_TRANSAKSI';
+            $keteranganLog = 'Melakukan refund (pengembalian dana) untuk transaksi lunas: ' . $transaksi['kode_invoice'];
+        } else {
+            // Tolak jika status sudah Batal atau Refund
+            return $this->fail('Transaksi ini sudah berstatus ' . $statusLama . ' dan tidak dapat diubah lagi.', 400);
+        }
+
+        // 3. Eksekusi Update ke Database
+        $model->update($id, ['status_pembayaran' => $statusBaru]);
+
+        // 4. Catat Log Aktivitas (Wajib untuk audit Owner)
+        $logModel = new \App\Models\LogAktivitasModel();
+        $logModel->insert([
+            'id_user'    => $idKasir,
+            'aksi'       => $aksiLog,
+            'keterangan' => $keteranganLog
+        ]);
+
+        return $this->respond([
+            'status'  => 200,
+            'message' => 'Transaksi berhasil diubah menjadi ' . $statusBaru . '!',
+            'data'    => [
+                'kode_invoice' => $transaksi['kode_invoice'],
+                'status_baru'  => $statusBaru
+            ]
+        ]);
+    }
 }

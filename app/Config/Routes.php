@@ -55,7 +55,7 @@ $routes->group('', ['filter' => 'jwt'], function ($routes) {
     $routes->post('payment/create', 'Payment::createTransaction');
     $routes->post('transaksi/lanjutkanPembayaran/(:num)', 'Transaksi::lanjutkanPembayaran/$1');
     $routes->put('transaksi/pelunasan/(:num)', 'Transaksi::pelunasanManual/$1');
-
+    $routes->post('transaksi/cancelOrRefund/(:num)', 'Transaksi::cancelOrRefund/$1');
     // ----------------------------------------
     // 📦 KUSTOM RUTE PRODUK
     // ----------------------------------------
@@ -69,5 +69,4 @@ $routes->group('', ['filter' => 'jwt'], function ($routes) {
     $routes->resource('produk');
     $routes->resource('transaksi');
     $routes->resource('user');
-
 });
