@@ -72,11 +72,29 @@ class LogAktivitas extends ResourceController
         $data = $builder->paginate($perPage, 'log', $page);
         $pager = $logModel->pager;
 
+        // ✨ PERBAIKAN: $pager sudah terhitung dari paginate() di atas, jadi metadata
+        // pagination-nya selalu disertakan di SEMUA kondisi respons — termasuk waktu
+        // datanya kosong. Sebelumnya cabang "data kosong" ini tidak mengirim key
+        // 'pagination' sama sekali, yang bikin Flutter crash waktu parsing
+        // (responseData['pagination']['total_halaman']) karena 'pagination'-nya null,
+        // dan errornya ke-catch generik jadi seolah-olah "kesalahan jaringan".
+        $paginationMeta = [
+            'halaman_sekarang' => (int) $page,
+            'total_halaman'    => $pager->getPageCount('log'),
+            'total_data'       => $pager->getTotal('log'),
+            'data_per_halaman' => $perPage
+        ];
+
         if (empty($data)) {
             return $this->respond([
-                'status'  => 200,
-                'message' => 'Belum ada riwayat aktivitas.',
-                'data'    => []
+                'status'     => 200,
+                'message'    => 'Belum ada riwayat aktivitas.',
+                'filter'     => [
+                    'role_pengakses' => $pengakses['role'],
+                    'id_user_dicari' => $idTarget ?? 'Semua User (Sesuai Hak Akses)'
+                ],
+                'pagination' => $paginationMeta,
+                'data'       => []
             ]);
         }
 
@@ -88,12 +106,7 @@ class LogAktivitas extends ResourceController
                 'id_user_dicari' => $idTarget ?? 'Semua User (Sesuai Hak Akses)'
             ],
             // 4. Tambahkan info metadata paginasi untuk frontend
-            'pagination' => [
-                'halaman_sekarang' => (int) $page,
-                'total_halaman'    => $pager->getPageCount('log'),
-                'total_data'       => $pager->getTotal('log'),
-                'data_per_halaman' => $perPage
-            ], 
+            'pagination' => $paginationMeta,
             'data'    => $data
         ]);
     }
